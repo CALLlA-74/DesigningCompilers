@@ -45,7 +45,7 @@ bb: boolean;
 	end;}
 
 begin    
- writeln('Hello World!');
+ writeln('Hello World! ', 9, ' ', 2E-5, ' ', 'c');
  {hi(10);
  readln;  } 
 end.

@@ -556,13 +556,17 @@ class ParserVisitor(PascalVisitor):
             ctx.customContext = ctx.getChild(0).customContext
             val:Constructs.Value = ctx.customContext
             val.typ = context.create_type(EmbeddedTypes.CustomType(ident=val.typ.typ_ident, typ_val=val.typ))
+            #
+            v = ir.GlobalVariable(context.module, val.instruct.type, name=EmbeddedTypes.get_unique_ident("literal"))
+            v.initializer = val.instruct
+
             if val.typ.ident == TypesEnum.STRING:
-                v = ir.GlobalVariable(context.module, val.instruct.type, name=EmbeddedTypes.get_unique_ident("literal"))
-                v.initializer = val.instruct
                 val.instruct = ir.GlobalVariable(context.module, val.typ.instruct, name=EmbeddedTypes.get_unique_ident("literal_ptr"))
                 val.instruct.initializer = ir.Constant(val.typ.instruct, None)
                 zero = ir.Constant(ir.IntType(32), 0)
                 context.get_ir_builder().store(v.gep(indices=[zero, zero]), val.instruct)
+            else:
+                val.instruct = v
 
             val.instruct = context.get_ir_builder().load(val.instruct)     # ??? not sure
         return True
