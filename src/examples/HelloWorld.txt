@@ -1,0 +1,51 @@
+program HelloWorld; 
+LABEL 1, 2;  
+LABEL 3;
+CONST t = 4E-5;
+	t4 = t;
+	t2 = -t;
+	t3 = t4;
+	l = 10;
+	l2 = -l;
+	cr = chr(50);
+TYPE int = integer;
+ptr_int = ^integer;
+tt = record 
+  a, b: integer;
+  c: real;
+  t: array[0..l] of boolean;
+  s: string[10];
+  next: ^tt;
+  ptr: record 
+    s: ptr_int;
+    next: ^tt
+  end
+end;
+ptr_tt = ^tt;
+ptr_ptr_tt = ^ptr_tt;
+VAR
+def_int: integer;
+i: record 
+  a, b: INTEGER;
+  c: REAL
+end;
+itt: tt;
+arr: array[1..2, 0..2] of CHAR;
+arr2: array[1..2] of array(.0..5, 4..10.) of tt;
+bb: boolean;
+
+{function test: integer;
+	begin
+	test := 0;
+	end;}
+
+{procedure hi(a:int);
+	begin
+		writeln('Hi, program HelloWorld!');
+	end;}
+
+begin    
+ writeln('Hello World!');
+ {hi(10);
+ readln;  } 
+end.
