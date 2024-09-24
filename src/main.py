@@ -1,4 +1,4 @@
-import sys
+import os, sys
 import llvmlite.binding as llvm
 from antlr4 import *
 from lexer_parser.antlr.PascalLexer import PascalLexer
@@ -7,24 +7,35 @@ from graphviz import Digraph
 from ir_builder.ParserVisitor import ParserVisitor
 from ir_builder.exceptions.CompileException import CompileException
 from ctypes import CFUNCTYPE, c_int32
+from IPython.display import display
 
 
-def main(argv=['', './examples/HelloWorld.txt']):
+def main(argv=['', './examples/benchmarks/bubble_sort_array.pas']):       # './examples/HelloWorld.pas'
     input_stream = FileStream(argv[1])
     lexer = PascalLexer(input_stream)
     stream = CommonTokenStream(lexer)
     parser = PascalParser(stream)
     tree = parser.program()
+
     if parser.getNumberOfSyntaxErrors() > 0:
         raise CompileException("Syntax error!")
     else:
         visitor = ParserVisitor()
         program = visitor.visit(tree)
         engine = init_execution_engine()
-        #tree.parentCtx = []
-        print(program.module)
+        #print(program.module)
         compile_ir(engine, program.module)
-        execute(engine, f"helloworld_main")
+        print("="*100)
+        filename = os.path.splitext(os.path.basename(argv[1]))[0].lower()
+        ll_file_path = argv[1].replace(os.path.basename(argv[1]), f'{filename}.ll')
+        file = open(f"{ll_file_path}", 'w')
+        file.write(str(program.module))
+        file.close()
+        print(f"\nIR-representation have saved in {ll_file_path}")
+        #input('Press <Enter> to execute')
+        print("\n" + "="*43 + 'PROGRAM OUTPUT' + '='*43)
+        func_main_name = f"{filename}_main"
+        execute(engine, func_main_name)
 
         #print_tree(tree).render("tree", view=True)
 
@@ -43,7 +54,8 @@ def init_execution_engine():
 def execute(engine, func_name="main"):
     func_ptr = engine.get_function_address(func_name)
     func = CFUNCTYPE(c_int32)(func_ptr)
-    print(func())
+    display(func(), clear=True)
+    #print()
 
 
 def compile_ir(engine, ir_module):
@@ -74,5 +86,5 @@ def print_tree(tree):
 
 
 if __name__ == '__main__':
-    main()
-    #main(sys.argv)
+    #main()
+    main(sys.argv)

@@ -31,6 +31,12 @@ class AbstractType(abc.ABC):
         else:
             return context.create_type(new_typ=CustomType(ident=None, typ_val=abstr_typ))
 
+    @abc.abstractmethod
+    def get_type_val(self, context): pass       # :Union[Context.ModuleContext, Context.ProcedureContext]
+
+    """ @abc.abstractmethod
+    def get_indices(self, indices:list, context): pass    # :Union[Context.ModuleContext, Context.ProcedureContext]"""
+
 
 class TypeIdentifier(AbstractType):
     def __init__(self, typ_ident: Union[TypesEnum, str]):
@@ -46,6 +52,15 @@ class TypeIdentifier(AbstractType):
     def get_init_val(self, context):
         t:Constructs.Type = context.get_var_by_ident(ident=self.typ_ident, search_scopes=[Scopes.TYPES])
         return ir.Constant(t.instruct, t.default_val)
+
+    def get_indices(self, indices:list, context):
+        typ:Constructs.Type = context.get_var_by_ident(ident=self.typ_ident, search_scopes=[Scopes.TYPES])
+
+    def get_type_val(self, context):
+        res = context.get_var_by_ident(ident=self.typ_ident, search_scopes=[Scopes.TYPES])
+        while isinstance(res.typ_val, TypeIdentifier) and res.typ_val.typ_ident not in TypesEnum:
+            res = context.get_var_by_ident(ident=res.typ_val.typ_ident, search_scopes=[Scopes.TYPES])
+        return res.typ_val
 
 
 class ProcedureType(AbstractType):
@@ -64,6 +79,9 @@ class ProcedureType(AbstractType):
 
     def get_init_val(self, context):
         return None
+
+    def get_type_val(self, context):
+        return self
 
 
 class FunctionType(AbstractType):
@@ -84,6 +102,9 @@ class FunctionType(AbstractType):
     def get_init_val(self, context):
         return None
 
+    def get_type_val(self, context):
+        return self
+
 
 class SubRangeType(AbstractType):
     def __init__(self, left:Union[Constructs.Value, int], right:Union[Constructs.Value, int]):
@@ -92,6 +113,8 @@ class SubRangeType(AbstractType):
         self.embedded_typ = EmbeddedTypesEnum.SUBRANGE
         self.length = -1
         self.dim = -1
+        self.length_val = None
+        self.dim_val = None
 
     def get_type(self):
         return self.embedded_typ
@@ -113,10 +136,23 @@ class SubRangeType(AbstractType):
                 raise CompileException(f"Subrange limits error: {self.left} > {self.right}")
             self.length = self.right - self.left + 1
             self.dim = self.left
+
+            if not self.length_val:
+                self.length_val = ir.GlobalVariable(context.get_module(), ir.IntType(64), name=get_unique_ident("len"))
+                self.length_val.initializer = ir.Constant(ir.IntType(64), self.length)
+            if not self.dim_val:
+                self.dim_val = ir.GlobalVariable(context.get_module(), ir.IntType(64), name=get_unique_ident("dim"))
+                self.dim_val.initializer = ir.Constant(ir.IntType(64), self.dim)
         return None
+
+    def load_dim_val(self, context):
+        return context.get_ir_builder().load(self.dim_val)
 
     def get_init_val(self, context):
         return None
+
+    def get_type_val(self, context):
+        return self
 
 
 class ArrayType(AbstractType):
@@ -149,6 +185,9 @@ class ArrayType(AbstractType):
             init_val = [init_val]*subr.length
         return ir.Constant(instr, init_val)
 
+    def get_type_val(self, context):
+        return self
+
 
 class StringType(AbstractType):
     def __init__(self, length: Any):
@@ -173,6 +212,9 @@ class StringType(AbstractType):
     def get_init_val(self, context):
         ir.Constant(ir.ArrayType(ir.IntType(8), self.length), bytearray('', 'utf-8'))
 
+    def get_type_val(self, context):
+        return self
+
 
 class RecordType(AbstractType):
 
@@ -180,11 +222,13 @@ class RecordType(AbstractType):
         self.embedded_typ = EmbeddedTypesEnum.RECORD
         self.field_list = field_list
         self.field_indexes = {}
+        self.fields = {}
         self.packed = packed
         self.__typ = None
 
         for idx, field in enumerate(self.field_list):
             self.field_indexes[field.ident] = idx
+            self.fields[field.ident] = field
 
     def get_type(self):
         return self.embedded_typ
@@ -213,6 +257,9 @@ class RecordType(AbstractType):
             vals.append(field.typ.default_val)
         return ir.Constant(typ=self.__typ, constant=vals)
 
+    def get_type_val(self, context):
+        return self
+
 
 class PointerType(AbstractType):
     def __init__(self, type_ident: Union[EmbeddedTypesEnum, str]):
@@ -227,6 +274,9 @@ class PointerType(AbstractType):
 
     def get_init_val(self, context):                        # :Union[Context.ModuleContext, Context.ProcedureContext]
         return ir.Constant(self.get_instr(context), None)
+
+    def get_type_val(self, context):
+        return self
 
 
 class CustomType:

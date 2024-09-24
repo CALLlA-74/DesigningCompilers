@@ -62,11 +62,14 @@ class ProcedureOrFunction:
 
 class Value:
     def __init__(self, typ:Union[Type, TypesEnum], val, sign:str = None,
-                 instruct:Union[llvmir.AllocaInstr, llvmir.GlobalVariable] = None):
+                 instruct:Union[llvmir.AllocaInstr, llvmir.GlobalVariable] = None,
+                 is_ptr=False):
         self.typ = typ
         self.val = val
         self.sign = sign
         self.instruct = instruct
+        self.parent_instruct = None
+        self.parent_alloca_instruct = None
 
     def get_val(self, context, search_scopes):              # :Union[Context.ModuleContext, Context.ProcedureContext]
         if self.typ == TypesEnum.IDENTIFIER or self.typ == TypesEnum.SIGNED_IDENTIFIER:

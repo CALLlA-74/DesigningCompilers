@@ -1,4 +1,4 @@
-program ifprog(input, output);
+program ifprog;
  
 (*** Demonstrate the if.  ***)
  

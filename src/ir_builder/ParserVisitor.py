@@ -1,5 +1,6 @@
 import ir_builder.context
 from typing import Union
+import typing
 from lexer_parser.antlr.PascalVisitor import PascalVisitor
 from lexer_parser.antlr.PascalParser import PascalParser
 from ir_builder.context.Context import ModuleContext, ProcedureContext
@@ -65,6 +66,10 @@ class ParserVisitor(PascalVisitor):
                     context.finish_main()
                     break
             self.visit(ctx.getChild(i))
+            if ctx.compoundStatement():
+                if ctx.getChild(i) == ctx.compoundStatement() and context.type() == "procedure":
+                    context.finish_func()
+
             """
             остались: 
             1) compoundStatement"""
@@ -85,18 +90,17 @@ class ParserVisitor(PascalVisitor):
 
     def visitConstantDefinitionPart(self, ctx:PascalParser.ConstantDefinitionPartContext):
         ctx.customContext = ctx.parentCtx.customContext
-        self.visitChildren(ctx)
         for const in ctx.constantDefinition():
+            self.visit(const)
             ctx.parentCtx.customContext.define_constant(const.customContext)
         return True
 
     def visitConstantDefinition(self, ctx:PascalParser.ConstantDefinitionContext):
-        self.visitChildren(ctx)
-        constant = ctx.constant().customContext
-        ctx.customContext = Constructs.Const(ident=ctx.identifier().customContext,
-                                             typ=constant.typ,
-                                             val=constant.val,
-                                             sign=constant.sign)
+        self.visit(ctx.identifier())
+        tmp = ctx.identifier().customContext
+        self.visit(ctx.constant())
+        const = ctx.constant().customContext
+        ctx.customContext = Constructs.Const(ident=ctx.identifier().customContext, typ=const.typ, val=const.val, sign=const.sign)
         return True
 
     def visitConstantChr(self, ctx:PascalParser.ConstantChrContext):
@@ -111,7 +115,7 @@ class ParserVisitor(PascalVisitor):
         self.visitChildren(ctx)
         if ctx.getChild(0) == ctx.unsignedNumber():
             ctx.customContext = ctx.unsignedNumber().customContext
-        elif ctx.getChild(0) == ctx.sign() and ctx.getChild(0) == ctx.unsignedNumber():
+        elif ctx.getChild(0) == ctx.sign() and ctx.getChild(1) == ctx.unsignedNumber():
             ctx.customContext = ctx.unsignedNumber().customContext
             ctx.customContext.val *= (-1 if ctx.sign().customContext == '-' else 1)
         elif ctx.string():
@@ -157,7 +161,7 @@ class ParserVisitor(PascalVisitor):
     def visitString(self, ctx:PascalParser.StringContext):
         s = ctx.STRING_LITERAL().symbol.text
         typ = EmbeddedTypes.TypeIdentifier(typ_ident=TypesEnum.STRING)
-        ctx.customContext = Constructs.Value(typ=typ, val=s[1:len(s) - 1])
+        ctx.customContext = Constructs.Value(typ=typ, val=s[1:len(s) - 1] + "\0")
         string = ctx.customContext.val
         ctx.customContext.instruct = ir.Constant(ir.ArrayType(ir.IntType(8), len(string)), bytearray(string, "utf-8"))
         return True
@@ -366,11 +370,9 @@ class ParserVisitor(PascalVisitor):
             params = ctx.formalParameterList().customContext
         else:
             params = []
-        proc = context.define_function(return_type=ir.VoidType(),
-                                args=params,
-                                name=proc_name)
+        proc = context.define_procedure(args=params,
+                                        name=proc_name)
         ctx.customContext = proc.local_ctx
-        # подумать над рекурсивными вызовами: в этом случае контекст функции/процедуры должен заново пересоздаваться
         self.visitBlock(ctx.block())
         return True
 
@@ -419,10 +421,10 @@ class ParserVisitor(PascalVisitor):
         else:
             params = []
         self.visitResultType(ctx.resultType())
-        res_type = ctx.resultType().customContext.get_instr(context)
+        res_type = ctx.resultType().customContext   # .get_instr(context)
         func = context.define_function(return_type=res_type,
-                                args=params,
-                                name=proc_name)
+                                       args=params,
+                                       name=proc_name)
         ctx.customContext = func.local_ctx
         self.visitBlock(ctx.block())
         return True
@@ -449,21 +451,90 @@ class ParserVisitor(PascalVisitor):
         self.visit(ctx.getChild(0))
         return True
 
-    # Visit a parse tree produced by PascalParser#assignmentStatement.
     def visitAssignmentStatement(self, ctx:PascalParser.AssignmentStatementContext):
-        return self.visitChildren(ctx)
+        context:Union[ModuleContext, ProcedureContext] = ctx.parentCtx.customContext
+        ctx.customContext = context
+        self.visit(ctx.variable())
+        self.visit(ctx.expression())
+        var:Constructs.Value = ctx.variable().customContext
+        val:Constructs.Value = ctx.expression().customContext
+        if var.instruct.type != val.instruct.type:
+            if var.instruct.type == ir.IntType(64) and val.instruct.type == ir.DoubleType():
+                val.instruct = context.get_ir_builder().fptosi(val.instruct, ir.IntType(64))
+            elif val.instruct.type == ir.IntType(64) and var.instruct.type == ir.DoubleType():
+                val.instruct = context.get_ir_builder().sitofp(val.instruct, ir.DoubleType())
+            else:
+                val.instruct = context.get_ir_builder().bitcast(val.instruct, var.instruct.type)
 
-    # Visit a parse tree produced by PascalParser#variable.
+        context.get_ir_builder().store(val.instruct, var.parent_instruct)
+        return True
+
     def visitVariable(self, ctx:PascalParser.VariableContext):
         context:Union[ModuleContext, ProcedureContext] = ctx.parentCtx.customContext
         ctx.customContext = context
-        self.visitChildren(ctx.getChildren())
-
-
-
+        self.visitChildren(ctx)
+        zero = ir.Constant(ir.IntType(32), 0)
+        indices = []
+        var = None
+        typ_val = None
+        try:
+            idx = 0
+            while idx < ctx.getChildCount():
+                if ctx.getChild(idx) in ctx.identifier():
+                    indices += [zero]
+                    var:Constructs.Const = context.get_var_by_ident(ident=ctx.getChild(idx).customContext,
+                                                                    search_scopes=[Scopes.VARS, Scopes.CONSTS])
+                    if not var:
+                        func:Constructs.ProcedureOrFunction = context.get_var_by_ident(ident=ctx.getChild(idx).customContext,
+                                                                                      search_scopes=[Scopes.FUNCTIONS])
+                        ctx.customContext = context.call_func(func, params=[])
+                        return True
+                    typ_val:typing.Type[EmbeddedTypes.AbstractType] = var.typ.typ_val
+                    parent_alloca_instruct = var.instruct
+                elif ctx.getChild(idx) in ctx.DOT():
+                    idx += 1
+                    ident = ctx.getChild(idx).customContext
+                    indices.append(ir.Constant(ir.IntType(32), typ_val.field_indexes[ident]))
+                    typ_val = typ_val.fields[ident].typ.typ_val
+                elif ctx.getChild(idx) in ctx.POINTER():
+                    ptr = context.get_ir_builder().gep(var.instruct, indices)
+                    var = Constructs.Value(typ=None, val=None, instruct=context.get_ir_builder().load(ptr))
+                    typ_val = context.get_var_by_ident(typ_val.typ.typ_ident, search_scopes=[Scopes.TYPES]).typ_val
+                    indices = [zero]
+                elif ctx.getChild(idx) in ctx.LBRACK() or ctx.getChild(idx) in ctx.LBRACK2():
+                    index = 0
+                    idx += 1
+                    while ctx.getChild(idx + 1) in ctx.COMMA() \
+                            or ctx.getChild(idx + 2) in ctx.LBRACK() \
+                            or ctx.getChild(idx + 2) in ctx.LBRACK2():
+                        v = ctx.getChild(idx).customContext
+                        index_val = context.get_ir_builder().sub(v.instruct, typ_val.subranges[index].load_dim_val(context))        # load(context)
+                        indices.append(index_val)    # v.load(context)
+                        if ctx.getChild(idx + 1) in ctx.COMMA():
+                            idx += 2
+                        else:
+                            idx += 3
+                        if index >= len(typ_val.subranges):
+                            typ_val = typ_val.typ.typ_val
+                            index = 0
+                        else:
+                            index += 1
+                    v = ctx.getChild(idx).customContext
+                    index_val = context.get_ir_builder().sub(v.instruct, typ_val.subranges[index].load_dim_val(context))    # load(context)
+                    indices.append(index_val)       # v.load(context)
+                idx += 1
+            ctx.customContext = Constructs.Value(typ=None, val=None,
+                                                 instruct=context.get_ir_builder().gep(ptr=var.instruct, indices=indices))
+            ctx.customContext.parent_instruct = ctx.customContext.instruct
+            ctx.customContext.parent_alloca_instruct = parent_alloca_instruct
+            if not ctx.AT():
+               ctx.customContext.instruct = context.get_ir_builder().load(ctx.customContext.instruct)     # ctx.customContext.is_ptr = True
+        except Exception as e:
+            print(e)
+            print(e.args)
+            raise CompileException(f"Variable getting error")
         return True
 
-    # Visit a parse tree produced by PascalParser#expression.
     def visitExpression(self, ctx:PascalParser.ExpressionContext):
         context:Union[ModuleContext, ProcedureContext] = ctx.parentCtx.customContext
         ctx.customContext = context
@@ -472,12 +543,18 @@ class ParserVisitor(PascalVisitor):
         if ctx.relationaloperator():
             self.visit(ctx.relationaloperator())
             self.visit(ctx.expression())
-        ctx.customContext = ctx.simpleExpression().customContext
+            op1 = ctx.simpleExpression().customContext
+            op2 = ctx.expression().customContext
+            operator = ctx.relationaloperator().customContext
+            ctx.customContext = VarUtils.relOperCalc(op1, op2, operator, context)
+        else:
+            ctx.customContext = ctx.simpleExpression().customContext
         return True
 
-    # Visit a parse tree produced by PascalParser#relationaloperator.
     def visitRelationaloperator(self, ctx:PascalParser.RelationaloperatorContext):
-        return self.visitChildren(ctx)
+        self.visit(ctx.getChild(0))
+        ctx.customContext = ctx.getChild(0).symbol.text
+        return True
 
     def visitSimpleExpression(self, ctx:PascalParser.SimpleExpressionContext):
         context:Union[ModuleContext, ProcedureContext] = ctx.parentCtx.customContext
@@ -487,12 +564,18 @@ class ParserVisitor(PascalVisitor):
         if ctx.additiveoperator():
             self.visit(ctx.additiveoperator())
             self.visit(ctx.simpleExpression())
-        ctx.customContext = ctx.term().customContext
+            op1 = ctx.term().customContext
+            op2 = ctx.simpleExpression().customContext
+            operator = ctx.additiveoperator().customContext
+            ctx.customContext = VarUtils.addOperCalc(op1, op2, operator, context)
+        else:
+            ctx.customContext = ctx.term().customContext
         return True
 
-    # Visit a parse tree produced by PascalParser#additiveoperator.
     def visitAdditiveoperator(self, ctx:PascalParser.AdditiveoperatorContext):
-        return self.visitChildren(ctx)
+        self.visit(ctx.getChild(0))
+        ctx.customContext = ctx.getChild(0).symbol.text
+        return True
 
     def visitTerm(self, ctx:PascalParser.TermContext):
         context:Union[ModuleContext, ProcedureContext] = ctx.parentCtx.customContext
@@ -502,26 +585,32 @@ class ParserVisitor(PascalVisitor):
         if ctx.multiplicativeoperator():
             self.visit(ctx.multiplicativeoperator())
             self.visit(ctx.term())
-        ctx.customContext = ctx.signedFactor().customContext
+            op1 = ctx.signedFactor().customContext
+            op2 = ctx.term().customContext
+            operator = ctx.multiplicativeoperator().customContext
+            ctx.customContext = VarUtils.mulOperCalc(op1, op2, operator, context)
+        else:
+            ctx.customContext = ctx.signedFactor().customContext
         return True
 
-    # Visit a parse tree produced by PascalParser#multiplicativeoperator.
     def visitMultiplicativeoperator(self, ctx:PascalParser.MultiplicativeoperatorContext):
-        return self.visitChildren(ctx)
+        self.visit(ctx.getChild(0))
+        ctx.customContext = ctx.getChild(0).symbol.text
+        return True
 
-    # Visit a parse tree produced by PascalParser#signedFactor.
     def visitSignedFactor(self, ctx:PascalParser.SignedFactorContext):
         context:Union[ModuleContext, ProcedureContext] = ctx.parentCtx.customContext
         ctx.customContext = context
 
         self.visit(ctx.factor())
+        ctx.customContext = ctx.factor().customContext
         if ctx.PLUS():
             pass
         elif ctx.MINUS():
-            pass
-        ctx.customContext = ctx.factor().customContext
+            ctx.customContext = VarUtils.inverse(ctx.customContext, context)
         return True
 
+    # set_ not AC
     def visitFactor(self, ctx:PascalParser.FactorContext):
         context:Union[ModuleContext, ProcedureContext] = ctx.parentCtx.customContext
         ctx.customContext = context
@@ -531,18 +620,22 @@ class ParserVisitor(PascalVisitor):
             ctx.customContext = ctx.bool_().customContext
             val:Constructs.Value = ctx.customContext
             val.typ = context.create_type(EmbeddedTypes.CustomType(ident=val.typ.typ_ident, typ_val=val.typ))
+            v = ir.GlobalVariable(context.get_module(), val.instruct.type, name=EmbeddedTypes.get_unique_ident("literal"))
+            v.initializer = val.instruct
+            val.instruct = v
+            val.instruct = context.get_ir_builder().load(val.instruct)
         elif ctx.NOT():
-            ctx.customContext = VarUtils.not_(ctx.factor().customContext, context)    # context.get_ir_builder().not_(ctx.factor().customContext)
+            ctx.customContext = VarUtils.not_(ctx.factor().customContext, context)
         elif ctx.set_():
             ctx.customContext = ctx.set_().customContext
         elif ctx.unsignedConstant():
             ctx.customContext = ctx.unsignedConstant().customContext
         elif ctx.functionDesignator():
-            pass
+            ctx.customContext = ctx.functionDesignator().customContext
         elif ctx.expression():
-            pass
+            ctx.customContext = ctx.expression().customContext
         elif ctx.variable():
-            pass
+            ctx.customContext = ctx.variable().customContext
         return True
 
     def visitUnsignedConstant(self, ctx:PascalParser.UnsignedConstantContext):
@@ -551,31 +644,37 @@ class ParserVisitor(PascalVisitor):
         if ctx.NIL():
             ctx.customContext = Constructs.Value(typ=None,
                                                  val=None,
-                                                 instruct=ir.Constant(ir.IntType(1), None))
+                                                 instruct=ir.Constant(ir.PointerType(ir.IntType(1)), None))
         else:
             ctx.customContext = ctx.getChild(0).customContext
             val:Constructs.Value = ctx.customContext
             val.typ = context.create_type(EmbeddedTypes.CustomType(ident=val.typ.typ_ident, typ_val=val.typ))
-            #
-            v = ir.GlobalVariable(context.module, val.instruct.type, name=EmbeddedTypes.get_unique_ident("literal"))
-            v.initializer = val.instruct
 
             if val.typ.ident == TypesEnum.STRING:
-                val.instruct = ir.GlobalVariable(context.module, val.typ.instruct, name=EmbeddedTypes.get_unique_ident("literal_ptr"))
+                v = ir.GlobalVariable(context.get_module(), val.instruct.type, name=EmbeddedTypes.get_unique_ident("literal"))
+                v.initializer = val.instruct
+
+                val.instruct = ir.GlobalVariable(context.get_module(), val.typ.instruct, name=EmbeddedTypes.get_unique_ident("literal_ptr"))
                 val.instruct.initializer = ir.Constant(val.typ.instruct, None)
                 zero = ir.Constant(ir.IntType(32), 0)
                 context.get_ir_builder().store(v.gep(indices=[zero, zero]), val.instruct)
-            else:
-                val.instruct = v
 
-            val.instruct = context.get_ir_builder().load(val.instruct)     # ??? not sure
+                val.instruct = context.get_ir_builder().load(val.instruct)
         return True
 
-    # Visit a parse tree produced by PascalParser#functionDesignator.
     def visitFunctionDesignator(self, ctx:PascalParser.FunctionDesignatorContext):
-        return self.visitChildren(ctx)
+        context:Union[ModuleContext, ProcedureContext] = ctx.parentCtx.customContext
+        ctx.customContext = context
+        self.visit(ctx.identifier())
+        self.visit(ctx.parameterList())
+        params = ctx.parameterList().customContext
+        func_name:str = ctx.identifier().customContext
+        func = context.get_var_by_ident(ident=func_name, search_scopes=[Scopes.FUNCTIONS])
+        if not func:
+            raise CompileException(f"No such function {func_name}")
+        ctx.customContext = context.call_func(func, params)
+        return True
 
-    # Visit a parse tree produced by PascalParser#parameterList.
     def visitParameterList(self, ctx:PascalParser.ParameterListContext):
         ctx.customContext = ctx.parentCtx.customContext
         params = []
@@ -624,6 +723,12 @@ class ParserVisitor(PascalVisitor):
             self.visit(ctx.parameterList())
             params = ctx.parameterList().customContext
         else:
+            if func_name == "exit":
+                if context.type() == "procedure":
+                    context.finish_func()
+                else:
+                    context.finish_main()
+                return True
             params = []
         proc = context.get_var_by_ident(ident=func_name, search_scopes=[Scopes.FUNCTIONS, Scopes.PROCEDURES])
         if not proc:
@@ -631,6 +736,7 @@ class ParserVisitor(PascalVisitor):
         context.call_func(proc, params)
         return True
 
+    # ???
     def visitActualParameter(self, ctx:PascalParser.ActualParameterContext):
         ctx.customContext = ctx.parentCtx.customContext
         self.visit(ctx.expression())
@@ -640,6 +746,7 @@ class ParserVisitor(PascalVisitor):
         ctx.customContext = ctx.expression().customContext
         return True
 
+    # ???
     def visitParameterwidth(self, ctx:PascalParser.ParameterwidthContext):
         ctx.customContext = ctx.parentCtx.customContext
         if ctx.expression():
@@ -653,13 +760,14 @@ class ParserVisitor(PascalVisitor):
     def visitEmptyStatement_(self, ctx:PascalParser.EmptyStatement_Context):
         return True
 
-    # Visit a parse tree produced by PascalParser#empty_.
     def visitEmpty_(self, ctx:PascalParser.Empty_Context):
-        return self.visitChildren(ctx)
+        return True
 
-    # Visit a parse tree produced by PascalParser#structuredStatement.
     def visitStructuredStatement(self, ctx:PascalParser.StructuredStatementContext):
-        return self.visitChildren(ctx)
+        context:Union[ModuleContext, ProcedureContext] = ctx.parentCtx.customContext
+        ctx.customContext = context
+        self.visit(ctx.getChild(0))
+        return True
 
     def visitCompoundStatement(self, ctx:PascalParser.CompoundStatementContext):
         ctx.customContext = ctx.parentCtx.customContext
@@ -672,13 +780,29 @@ class ParserVisitor(PascalVisitor):
             self.visit(st)
         return True
 
-    # Visit a parse tree produced by PascalParser#conditionalStatement.
     def visitConditionalStatement(self, ctx:PascalParser.ConditionalStatementContext):
-        return self.visitChildren(ctx)
+        context:Union[ModuleContext, ProcedureContext] = ctx.parentCtx.customContext
+        ctx.customContext = context
+        self.visit(ctx.getChild(0))
+        return True
 
-    # Visit a parse tree produced by PascalParser#ifStatement.
     def visitIfStatement(self, ctx:PascalParser.IfStatementContext):
-        return self.visitChildren(ctx)
+        context:Union[ModuleContext, ProcedureContext] = ctx.parentCtx.customContext
+        ctx.customContext = context
+        self.visit(ctx.expression())
+        pred = ctx.expression().customContext.instruct
+
+        if ctx.ELSE():
+            with context.get_ir_builder().if_else(pred) as (then, otherwise):
+                with then:
+                    self.visit(ctx.statement()[0])
+                with otherwise:
+                    self.visit(ctx.statement()[1])
+        else:
+            with context.get_ir_builder().if_then(pred):
+                self.visit(ctx.statement()[0])
+
+        return True
 
     # Visit a parse tree produced by PascalParser#caseStatement.
     def visitCaseStatement(self, ctx:PascalParser.CaseStatementContext):
@@ -688,33 +812,129 @@ class ParserVisitor(PascalVisitor):
     def visitCaseListElement(self, ctx:PascalParser.CaseListElementContext):
         return self.visitChildren(ctx)
 
-    # Visit a parse tree produced by PascalParser#repetetiveStatement.
     def visitRepetetiveStatement(self, ctx:PascalParser.RepetetiveStatementContext):
-        return self.visitChildren(ctx)
+        context:Union[ModuleContext, ProcedureContext] = ctx.parentCtx.customContext
+        ctx.customContext = context
+        self.visit(ctx.getChild(0))
+        return True
 
-    # Visit a parse tree produced by PascalParser#whileStatement.
     def visitWhileStatement(self, ctx:PascalParser.WhileStatementContext):
-        return self.visitChildren(ctx)
+        context:Union[ModuleContext, ProcedureContext] = ctx.parentCtx.customContext
+        ctx.customContext = context
+
+        bbcond = context.get_ir_builder().append_basic_block(name=EmbeddedTypes.get_unique_ident('cond'))
+        bbwhile = context.get_ir_builder().append_basic_block(name=EmbeddedTypes.get_unique_ident('while'))
+        bbafter = context.get_ir_builder().append_basic_block(name=EmbeddedTypes.get_unique_ident('after'))
+
+        context.get_ir_builder().branch(bbcond)
+        context.get_ir_builder().position_at_start(bbcond)
+        self.visit(ctx.expression())
+        pred = ctx.expression().customContext.instruct
+        context.get_ir_builder().cbranch(pred, bbwhile, bbafter)
+
+        context.get_ir_builder().position_at_start(bbwhile)
+        self.visit(ctx.statement())
+        context.get_ir_builder().branch(bbcond)
+        context.get_ir_builder().position_at_start(bbafter)
+        return True
 
     # Visit a parse tree produced by PascalParser#repeatStatement.
     def visitRepeatStatement(self, ctx:PascalParser.RepeatStatementContext):
-        return self.visitChildren(ctx)
+        context:Union[ModuleContext, ProcedureContext] = ctx.parentCtx.customContext
+        ctx.customContext = context
+
+        bbrepeat = context.get_ir_builder().append_basic_block(name=EmbeddedTypes.get_unique_ident('repeat'))
+        bbuntil = context.get_ir_builder().append_basic_block(name=EmbeddedTypes.get_unique_ident('until'))
+        bbafter = context.get_ir_builder().append_basic_block(name=EmbeddedTypes.get_unique_ident('after'))
+
+        context.get_ir_builder().branch(bbrepeat)
+        context.get_ir_builder().position_at_start(bbrepeat)
+        self.visit(ctx.statements())
+
+        context.get_ir_builder().branch(bbuntil)
+        context.get_ir_builder().position_at_start(bbuntil)
+        self.visit(ctx.expression())
+        pred = VarUtils.not_(ctx.expression().customContext, context).instruct
+        context.get_ir_builder().cbranch(pred, bbrepeat, bbafter)
+        context.get_ir_builder().position_at_start(bbafter)
+        return True
 
     # Visit a parse tree produced by PascalParser#forStatement.
     def visitForStatement(self, ctx:PascalParser.ForStatementContext):
-        return self.visitChildren(ctx)
+        context:Union[ModuleContext, ProcedureContext] = ctx.parentCtx.customContext
+        ctx.customContext = context
 
-    # Visit a parse tree produced by PascalParser#forList.
+        bbprepare = context.get_ir_builder().append_basic_block(name=EmbeddedTypes.get_unique_ident('prepare_for'))
+        bbcond = context.get_ir_builder().append_basic_block(name=EmbeddedTypes.get_unique_ident('cond'))
+        bbfor = context.get_ir_builder().append_basic_block(name=EmbeddedTypes.get_unique_ident('for'))
+        bbafter = context.get_ir_builder().append_basic_block(name=EmbeddedTypes.get_unique_ident('after'))
+
+        context.get_ir_builder().branch(bbprepare)
+        context.get_ir_builder().position_at_start(bbprepare)
+        self.visit(ctx.identifier())
+        ident = ctx.identifier().customContext
+        var_iterator = context.get_var_by_ident(ident=ident, search_scopes=[Scopes.VARS])
+        v = Constructs.Value(typ=None, val=None)
+        v.parent_instruct = var_iterator.instruct
+        backup, var_iterator = var_iterator, v
+
+        self.visit(ctx.forList())
+        init_val:Constructs.Value = ctx.forList().customContext[0]
+        final_val:Constructs.Value = ctx.forList().customContext[1]
+        step:Constructs.Value = ctx.forList().customContext[2]
+        zero_val = Constructs.Value(typ=None, val=None, instruct=ir.Constant(ir.IntType(64), 0))
+        #context.vars.pop(ident)     # удаляем переменную, выбранною в качестве счетчика перед циклом
+        context.get_ir_builder().store(init_val.instruct, var_iterator.parent_instruct)
+
+        v1 = VarUtils.lt_le_gt_ge(init_val, final_val, '<=', context)
+        v2 = VarUtils.lt_le_gt_ge(step, zero_val, '>', context)
+        v3 = VarUtils.lt_le_gt_ge(init_val, final_val, '>=', context)
+        v4 = VarUtils.lt_le_gt_ge(step, zero_val, '<', context)
+        v5 = VarUtils.and_(v1, v2, context)
+        v6 = VarUtils.and_(v3, v4, context)
+        prep_cond = VarUtils.or_(v5, v6, context)
+        context.get_ir_builder().cbranch(prep_cond.instruct, bbcond, bbafter)
+
+        context.get_ir_builder().position_at_start(bbcond)
+        var_iterator.instruct = context.get_ir_builder().load(var_iterator.parent_instruct)
+        cond = VarUtils.lt_le_gt_ge(var_iterator, final_val, '<=', context)
+        context.get_ir_builder().cbranch(cond.instruct, bbfor, bbafter)
+
+        context.get_ir_builder().position_at_start(bbfor)
+        self.visit(ctx.statement())
+        new_val_iter = VarUtils.plus(var_iterator, step, context)
+        context.get_ir_builder().store(new_val_iter.instruct, var_iterator.parent_instruct)
+        context.get_ir_builder().branch(bbcond)
+
+        context.get_ir_builder().position_at_start(bbafter)
+        #context.vars[ident] = backup     # возвращаем переменную-счетчик обратно после выхода из цикла
+        return True
+
     def visitForList(self, ctx:PascalParser.ForListContext):
-        return self.visitChildren(ctx)
+        context:Union[ModuleContext, ProcedureContext] = ctx.parentCtx.customContext
+        ctx.customContext = context
 
-    # Visit a parse tree produced by PascalParser#initialValue.
+        self.visit(ctx.initialValue())
+        self.visit(ctx.finalValue())
+        step = 1 if ctx.TO() else -1
+        step = ir.Constant(ir.IntType(64), step)
+        step = Constructs.Value(typ=None, val=None, instruct=step)
+        ctx.customContext = [ctx.initialValue().customContext, ctx.finalValue().customContext, step]
+        return True
+
     def visitInitialValue(self, ctx:PascalParser.InitialValueContext):
-        return self.visitChildren(ctx)
+        context:Union[ModuleContext, ProcedureContext] = ctx.parentCtx.customContext
+        ctx.customContext = context
+        self.visit(ctx.expression())
+        ctx.customContext = ctx.expression().customContext
+        return True
 
-    # Visit a parse tree produced by PascalParser#finalValue.
     def visitFinalValue(self, ctx:PascalParser.FinalValueContext):
-        return self.visitChildren(ctx)
+        context:Union[ModuleContext, ProcedureContext] = ctx.parentCtx.customContext
+        ctx.customContext = context
+        self.visit(ctx.expression())
+        ctx.customContext = ctx.expression().customContext
+        return True
 
     # Visit a parse tree produced by PascalParser#withStatement.
     def visitWithStatement(self, ctx:PascalParser.WithStatementContext):

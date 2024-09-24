@@ -96,7 +96,7 @@ def create_var_(name:str, typ: Constructs.Type, context,        # typing.Union[M
     if init_val is None:
         init_val = typ.default_val  # get_init_val()
     if is_global or is_const:
-        variable = llvmir.GlobalVariable(context.module, typ.instruct, name=name)
+        variable = llvmir.GlobalVariable(context.get_module(), typ.instruct, name=name)
         variable.linkage = "private"
         variable.global_constant = is_const
         variable.initializer = init_val
@@ -117,12 +117,265 @@ def is_primitive(operand) -> bool:
     return False
 
 
-def not_(operand:typing.Union[Constructs.Variable, Constructs.Value, Constructs.Const],
-         context):                                          # typing.Union[ModuleContext, ProcedureContext]
-    if not is_primitive(operand):
-        raise CompileException(f"Expected primitive type for operator NOT, but got {type(operand)}")
-    if operand.typ.instruct != llvmir.IntType(1):   # если тип не boolean
-        raise CompileException(f"Inoperable type {operand.typ.instruct} for operator NOT")
-
+def not_(operand:typing.Union[Constructs.Value], context):           # typing.Union[ModuleContext, ProcedureContext]
     ir_builder:llvmir.IRBuilder = context.get_ir_builder()
-    return Constructs.Value(typ=operand.typ, val=None, instruct=ir_builder.not_(operand.instruct))
+    return Constructs.Value(typ=None, val=None, instruct=ir_builder.not_(operand.instruct))
+
+
+def inverse(operand:typing.Union[Constructs.Value], context):
+    ir_builder:llvmir.IRBuilder = context.get_ir_builder()
+    if operand.instruct.type == llvmir.IntType(64):
+        res = ir_builder.mul(operand.instruct, llvmir.Constant(operand.instruct.type, -1))
+    elif operand.instruct.type == llvmir.DoubleType():
+        res = ir_builder.fmul(operand.instruct, llvmir.Constant(operand.instruct.type, -1))
+    else:
+        raise CompileException(f"Operator \'*\' is unsupportable for variable of type: {operand.instruct.type}")
+    return Constructs.Value(typ=None, val=None, instruct=res)
+
+
+def mulOperCalc(op1:typing.Union[Constructs.Value], op2:typing.Union[Constructs.Value], operator:str, context):
+    if operator == '*':
+        return mul(op1, op2, context)
+    elif operator == '/':
+        return slash(op1, op2, context)
+    elif operator == 'div':
+        return div(op1, op2, context)
+    elif operator == 'mod':
+        return mod(op1, op2, context)
+    elif operator == 'and':
+        return and_(op1, op2, context)
+
+
+def mul(op1:typing.Union[Constructs.Value], op2:typing.Union[Constructs.Value], context):
+    ir_builder:llvmir.IRBuilder = context.get_ir_builder()
+    targets = [llvmir.DoubleType(), llvmir.IntType(64)]
+    if op1.instruct.type not in targets or op2.instruct.type not in targets:
+        raise CompileException(f"Operator \'*\' is unsupportable for variable of type: {op1.instruct.type}")
+
+    instr_1, instr_2 = op1.instruct, op2.instruct
+    if op1.instruct.type != op2.instruct.type:
+        if op1.instruct.type == llvmir.DoubleType():
+            instr_2 = ir_builder.sitofp(instr_2, llvmir.DoubleType())
+        else:
+            instr_1 = ir_builder.sitofp(instr_1, llvmir.DoubleType())
+
+    if instr_1.type == llvmir.IntType(64):
+        res = ir_builder.mul(instr_1, instr_2)
+    else:
+        res = ir_builder.fmul(instr_1, instr_2)
+    return Constructs.Value(typ=None, val=None, instruct=res)
+
+
+def slash(op1:typing.Union[Constructs.Value], op2:typing.Union[Constructs.Value], context):
+    ir_builder:llvmir.IRBuilder = context.get_ir_builder()
+    targets = [llvmir.DoubleType(), llvmir.IntType(64)]
+    if op1.instruct.type not in targets or op2.instruct.type not in targets:
+        if op1.instruct.type not in targets:
+            raise CompileException(f"Operator \'/\' is unsupportable for variable of type: {op1.instruct.type}")
+        else:
+            raise CompileException(f"Operator \'/\' is unsupportable for variable of type: {op2.instruct.type}")
+
+    instr_1, instr_2 = op1.instruct, op2.instruct
+    if op1.instruct.type != llvmir.DoubleType():
+        instr_1 = ir_builder.sitofp(instr_1, llvmir.DoubleType())
+    if op2.instruct.type != llvmir.DoubleType():
+        instr_2 = ir_builder.sitofp(instr_2, llvmir.DoubleType())
+
+    res = ir_builder.fdiv(instr_1, instr_2)
+    return Constructs.Value(typ=None, val=None, instruct=res)
+
+
+def div(op1:typing.Union[Constructs.Value], op2:typing.Union[Constructs.Value], context):
+    ir_builder:llvmir.IRBuilder = context.get_ir_builder()
+    targets = [llvmir.IntType(64)]
+    if op1.instruct.type not in targets or op2.instruct.type not in targets:
+        if op1.instruct.type not in targets:
+            raise CompileException(f"Operator \'div\' is unsupportable for variable of type: {op1.instruct.type}")
+        else:
+            raise CompileException(f"Operator \'div\' is unsupportable for variable of type: {op2.instruct.type}")
+
+    instr_1, instr_2 = op1.instruct, op2.instruct
+    res = ir_builder.sdiv(instr_1, instr_2)
+    return Constructs.Value(typ=None, val=None, instruct=res)
+
+
+def mod(op1:typing.Union[Constructs.Value], op2:typing.Union[Constructs.Value], context):
+    ir_builder:llvmir.IRBuilder = context.get_ir_builder()
+    targets = [llvmir.IntType(64)]
+    if op1.instruct.type not in targets or op2.instruct.type not in targets:
+        if op1.instruct.type not in targets:
+            raise CompileException(f"Operator \'mod\' is unsupportable for variable of type: {op1.instruct.type}")
+        else:
+            raise CompileException(f"Operator \'mod\' is unsupportable for variable of type: {op2.instruct.type}")
+
+    instr_1, instr_2 = op1.instruct, op2.instruct
+    res = ir_builder.srem(instr_1, instr_2)
+    return Constructs.Value(typ=None, val=None, instruct=res)
+
+
+def and_(op1:typing.Union[Constructs.Value], op2:typing.Union[Constructs.Value], context):
+    ir_builder:llvmir.IRBuilder = context.get_ir_builder()
+    targets = [llvmir.IntType(64), llvmir.IntType(1)]
+    if op1.instruct.type not in targets or op2.instruct.type not in targets:
+        if op1.instruct.type not in targets:
+            raise CompileException(f"Operator \'and\' is unsupportable for variable of type: {op1.instruct.type}")
+        else:
+            raise CompileException(f"Operator \'and\' is unsupportable for variable of type: {op2.instruct.type}")
+    if op1.instruct.type != op2.instruct.type:
+        raise CompileException(f"Operator \'and\' is unsupportable for variables of not similar types: "
+                               f"\'{op1.instruct.type}\' and \'{op2.instruct.type}\'")
+
+    instr_1, instr_2 = op1.instruct, op2.instruct
+    res = ir_builder.and_(instr_1, instr_2)
+    return Constructs.Value(typ=None, val=None, instruct=res)
+
+
+def addOperCalc(op1:typing.Union[Constructs.Value], op2:typing.Union[Constructs.Value], operator:str, context):
+    if operator == '+':
+        return plus(op1, op2, context)
+    elif operator == '-':
+        return mines(op1, op2, context)
+    elif operator == 'or':
+        return or_(op1, op2, context)
+
+
+def plus(op1:typing.Union[Constructs.Value], op2:typing.Union[Constructs.Value], context):
+    ir_builder:llvmir.IRBuilder = context.get_ir_builder()
+    targets = [llvmir.DoubleType(), llvmir.IntType(64)]
+    if op1.instruct.type not in targets or op2.instruct.type not in targets:
+        raise CompileException(f"Operator \'+\' is unsupportable for variable of type: {op1.instruct.type}")
+
+    instr_1, instr_2 = op1.instruct, op2.instruct
+    if op1.instruct.type != op2.instruct.type:
+        if op1.instruct.type == llvmir.DoubleType():
+            instr_2 = ir_builder.sitofp(instr_2, llvmir.DoubleType())
+        else:
+            instr_1 = ir_builder.sitofp(instr_1, llvmir.DoubleType())
+
+    if instr_1.type == llvmir.IntType(64):
+        res = ir_builder.add(instr_1, instr_2)
+    else:
+        res = ir_builder.fadd(instr_1, instr_2)
+    return Constructs.Value(typ=None, val=None, instruct=res)
+
+
+def mines(op1:typing.Union[Constructs.Value], op2:typing.Union[Constructs.Value], context):
+    ir_builder:llvmir.IRBuilder = context.get_ir_builder()
+    targets = [llvmir.DoubleType(), llvmir.IntType(64)]
+    if op1.instruct.type not in targets or op2.instruct.type not in targets:
+        raise CompileException(f"Operator \'-\' is unsupportable for variable of type: {op1.instruct.type}")
+
+    instr_1, instr_2 = op1.instruct, op2.instruct
+    if op1.instruct.type != op2.instruct.type:
+        if op1.instruct.type == llvmir.DoubleType():
+            instr_2 = ir_builder.sitofp(instr_2, llvmir.DoubleType())
+        else:
+            instr_1 = ir_builder.sitofp(instr_1, llvmir.DoubleType())
+
+    if instr_1.type == llvmir.IntType(64):
+        res = ir_builder.sub(instr_1, instr_2)
+    else:
+        res = ir_builder.fsub(instr_1, instr_2)
+    return Constructs.Value(typ=None, val=None, instruct=res)
+
+
+def or_(op1:typing.Union[Constructs.Value], op2:typing.Union[Constructs.Value], context):
+    ir_builder:llvmir.IRBuilder = context.get_ir_builder()
+    targets = [llvmir.IntType(64), llvmir.IntType(1)]
+    if op1.instruct.type not in targets or op2.instruct.type not in targets:
+        if op1.instruct.type not in targets:
+            raise CompileException(f"Operator \'or\' is unsupportable for variable of type: {op1.instruct.type}")
+        else:
+            raise CompileException(f"Operator \'or\' is unsupportable for variable of type: {op2.instruct.type}")
+    if op1.instruct.type != op2.instruct.type:
+        raise CompileException(f"Operator \'or\' is unsupportable for variables of not similar types: "
+                               f"\'{op1.instruct.type}\' and \'{op2.instruct.type}\'")
+
+    instr_1, instr_2 = op1.instruct, op2.instruct
+    res = ir_builder.or_(instr_1, instr_2)
+    return Constructs.Value(typ=None, val=None, instruct=res)
+
+
+def relOperCalc(op1:typing.Union[Constructs.Value], op2:typing.Union[Constructs.Value], operator:str, context):
+    if operator == '=':
+        return equal(op1, op2, context)
+    elif operator == '<>':
+        return not_equal(op1, op2, context)
+    else:
+        return lt_le_gt_ge(op1, op2, operator, context)
+
+
+def equal(op1:typing.Union[Constructs.Value], op2:typing.Union[Constructs.Value], context):
+    ir_builder:llvmir.IRBuilder = context.get_ir_builder()
+    targets = [llvmir.DoubleType(), llvmir.IntType(64)]
+
+    if isinstance(op1.instruct, llvmir.Constant):
+        op1, op2 = op2, op1
+
+    if (op1.instruct.type not in targets and not isinstance(op1.instruct.type, llvmir.PointerType)) \
+            or (op2.instruct.type not in targets and not isinstance(op2.instruct.type, llvmir.PointerType)):
+        raise CompileException(f"Operator \'=\' is unsupportable for variables of types: {op1.instruct.type} and {op2.instruct.type}")
+
+    instr_1, instr_2 = op1.instruct, op2.instruct
+    if op1.instruct.type != op2.instruct.type:
+        if op1.instruct.type == llvmir.DoubleType():
+            instr_2 = ir_builder.sitofp(instr_2, llvmir.DoubleType())
+        elif op2.instruct.type == llvmir.DoubleType():
+            instr_1 = ir_builder.sitofp(instr_1, llvmir.DoubleType())
+
+    if instr_1.type == llvmir.DoubleType():                             # llvmir.IntType(64)
+        res = ir_builder.fcmp_ordered('==', instr_1, instr_2)
+    else:
+        res = ir_builder.icmp_signed('==', instr_1, instr_2)
+
+    return Constructs.Value(typ=None, val=None, instruct=res)
+
+
+def not_equal(op1:typing.Union[Constructs.Value], op2:typing.Union[Constructs.Value], context):
+    ir_builder:llvmir.IRBuilder = context.get_ir_builder()
+    targets = [llvmir.DoubleType(), llvmir.IntType(64)]
+
+    if isinstance(op1.instruct, llvmir.Constant):
+        op1, op2 = op2, op1
+
+    if (op1.instruct.type not in targets and not isinstance(op1.instruct.type, llvmir.PointerType)) \
+            or (op2.instruct.type not in targets and not isinstance(op2.instruct.type, llvmir.PointerType)):
+        raise CompileException(f"Operator \'<>\' is unsupportable for variables of types: {op1.instruct.type} and {op2.instruct.type}")
+
+    instr_1, instr_2 = op1.instruct, op2.instruct
+    if op1.instruct.type != op2.instruct.type:
+        if op1.instruct.type == llvmir.DoubleType():
+            instr_2 = ir_builder.sitofp(instr_2, llvmir.DoubleType())
+        elif op2.instruct.type == llvmir.DoubleType():
+            instr_1 = ir_builder.sitofp(instr_1, llvmir.DoubleType())
+
+    if instr_1.type == llvmir.DoubleType():                             # llvmir.IntType(64)
+        res = ir_builder.fcmp_ordered('!=', instr_1, instr_2)
+    else:
+        res = ir_builder.icmp_signed('!=', instr_1, instr_2)
+
+    return Constructs.Value(typ=None, val=None, instruct=res)
+
+
+def lt_le_gt_ge(op1:typing.Union[Constructs.Value], op2:typing.Union[Constructs.Value], operator:str, context):
+    ir_builder:llvmir.IRBuilder = context.get_ir_builder()
+    targets = [llvmir.DoubleType(), llvmir.IntType(64)]
+
+    if (op1.instruct.type not in targets) \
+            or (op2.instruct.type not in targets):
+        raise CompileException(f"Operator \'{operator}\' is unsupportable for variables of types: {op1.instruct.type} "
+                               f"and {op2.instruct.type}")
+
+    instr_1, instr_2 = op1.instruct, op2.instruct
+    if op1.instruct.type != op2.instruct.type:
+        if op1.instruct.type == llvmir.DoubleType():
+            instr_2 = ir_builder.sitofp(instr_2, llvmir.DoubleType())
+        elif op2.instruct.type == llvmir.DoubleType():
+            instr_1 = ir_builder.sitofp(instr_1, llvmir.DoubleType())
+
+    if instr_1.type == llvmir.DoubleType():                             # llvmir.IntType(64)
+        res = ir_builder.fcmp_ordered(operator, instr_1, instr_2)
+    else:
+        res = ir_builder.icmp_signed(operator, instr_1, instr_2)
+
+    return Constructs.Value(typ=None, val=None, instruct=res)

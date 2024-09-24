@@ -92,14 +92,15 @@ var.global_constant = False
 typ = llvmir.PointerType(llvmir.IntType(8))
 var = llvmir.GlobalVariable(builder.module, typ, name="var")
 var.initializer = llvmir.Constant(typ, None)
-var.linkage = "common"
-res = builder.call(func_realloc, [builder.load(var), llvmir.Constant(int32, 256)])
-builder.store(res, var)
+var.linkage = "private"
+#res = builder.call(func_realloc, [builder.load(var), llvmir.Constant(int32, 256)])
+#builder.store(res, var)
 
 # сохраняем литеральную строку в динамическую
 str_val = llvmir.GlobalVariable(builder.module, llvmir.ArrayType(llvmir.IntType(8), 3), name='str_val')
 str_val.initializer = llvmir.Constant(llvmir.ArrayType(llvmir.IntType(8), 3), bytearray("abc", "utf-8"))
-builder.store(str_val.gep([zero, zero]), var)
+tmp = str_val.gep([zero, zero])
+builder.store(tmp, var)
 
 # сохраняем другую литеральную строку в динамическую
 str_val_2 = llvmir.GlobalVariable(builder.module, llvmir.ArrayType(llvmir.IntType(8), 7), name='str_val_2')
@@ -123,13 +124,27 @@ val = [[0.0, 1.0, 2.0, 4E-5]]*2
 builder.store(llvmir.Constant(arr_type, val), ptr=arr)
 
 
+float_val = llvmir.GlobalVariable(module_ir, llvmir.DoubleType(), name="float_val")
+float_val.initializer = llvmir.Constant(llvmir.DoubleType(), -5.5)
+
 #builder.call(func_printf, [create_global_string(builder, ' ' * 100000 + '\n\0', 'a')])
 #builder.call(func_printf, [create_global_string(builder, 'Русский тестим\n\0', 'p2')])
-# builder.call(func_scanf, [create_global_string(builder, '%s\0', 'ddt'), var])       # builder.gep(var, [zero, zero], inbounds=True)
-builder.call(func_printf, [create_global_string(builder, '%s\n%.2f; %f\n\0', 'ddt'),
+"""args = [create_global_string(builder, '%f\0', 'ddt100'), builder.gep(float_val, [zero])]
+builder.call(func_scanf, args)       # builder.gep(var, [zero, zero], inbounds=True)"""
+
+
+# создаю локальную переменную idx
+idx = builder.alloca(llvmir.IntType(64), name='idx')
+builder.store(llvmir.Constant(llvmir.IntType(64), 1), builder.gep(idx, [zero]))      # закидываю в нее 1
+
+ptr_idx = builder.alloca(llvmir.PointerType(llvmir.IntType(64)), name="ptr_idx")
+builder.store(builder.gep(idx, [zero]), ptr_idx)
+
+builder.call(func_printf, [create_global_string(builder, '%s\n%d\n%f; %f\n\0', 'ddt'),
                            #llvmir.Constant(llvmir.IntType(1), None),
                            builder.load(var),
-                           builder.load(ptr=builder.gep(ptr=arr, indices=[zero, zero, llvmir.Constant(llvmir.IntType(32), 2)])),
+                           builder.load(builder.gep(idx, [zero])),
+                           builder.load(ptr=builder.gep(ptr=arr, indices=[zero, zero, builder.load(builder.gep(idx, [zero]))], inbounds=True)),
                            builder.load(ptr=builder.gep(ptr=arr, indices=[zero, llvmir.Constant(llvmir.IntType(32), 1), llvmir.Constant(llvmir.IntType(32), 3)]))])
 """builder.call(func_printf, [create_global_string(builder, '%s\n\0', 'ddt3'),
                            builder.load(var)])  # builder.gep(var, [zero], inbounds=True)"""
@@ -142,15 +157,25 @@ builder.call(func_printf, [create_global_string(builder, '%s\n%.2f; %f\n\0', 'dd
 
 # пример описания структуры с полем типа указателя на саму себя
 struct2 = module_ir.context.get_identified_type("node")
-struct2.set_body(*[llvmir.PointerType(struct2), llvmir.IntType(8), llvmir.DoubleType()])
+struct3 = module_ir.context.get_identified_type("struct3")
+struct2.set_body(*[struct3, llvmir.IntType(8), llvmir.DoubleType()])
+struct3.set_body(*[llvmir.DoubleType(), llvmir.IntType(64)])
 
 lst = builder.alloca(struct2, name="lst")
+
 
 
 builder.store(llvmir.Constant(struct2, [None, 0, llvmir.Constant(llvmir.DoubleType(), 10.0)]), ptr=lst)
 builder.store(llvmir.Constant(llvmir.DoubleType(), -100), ptr=builder.gep(ptr=lst, indices=[zero, llvmir.Constant(llvmir.IntType(32), 2)]))
 builder.store(llvmir.Constant(llvmir.DoubleType(), -1), ptr=builder.gep(ptr=lst, indices=[zero, llvmir.Constant(llvmir.IntType(32), 2)]))
-builder.call(func_printf, [create_global_string(builder, '%f\n\0', 'ddt2'), builder.load(builder.gep(ptr=lst, indices=[zero, llvmir.Constant(llvmir.IntType(32), 2)]))])
+builder.store(llvmir.Constant(llvmir.IntType(64), -21), ptr=builder.gep(ptr=lst, indices=[zero, zero, llvmir.Constant(llvmir.IntType(32), 1)]))
+
+
+
+# пытаюсь вывести значение по индексу из структуры
+builder.call(func_printf, [create_global_string(builder, '%f; %f\n\0', 'ddt2'),
+                           builder.load(builder.gep(ptr=lst, indices=[zero, llvmir.Constant(llvmir.IntType(32), 2)])),
+                           builder.load(builder.gep(ptr=lst, indices=[zero]))])
 
 
 builder.alloca(llvmir.IntType(64), name='aadfgfhf')
